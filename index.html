@@ -88,9 +88,12 @@ body.tool-text .annot.text{cursor:text}
 .annot.stroke.sel{outline:none}
 .annot.stroke.sel .bb{display:inline}
 .annot.stroke.sel .ep{display:inline;pointer-events:all;cursor:grab}
-body.tool-line .overlay,body.tool-hl .overlay{cursor:crosshair;touch-action:none}
-body.tool-line .annot,body.tool-hl .annot,body.tool-line .annot .hit,body.tool-hl .annot .hit,
-body.tool-line .annot .ep,body.tool-hl .annot .ep{pointer-events:none}
+body.tool-line .overlay,body.tool-hl .overlay,body.tool-box .overlay{cursor:crosshair;touch-action:none}
+body.tool-line .annot,body.tool-hl .annot,body.tool-box .annot,body.tool-line .annot .hit,body.tool-hl .annot .hit,
+body.tool-box .annot .hit,body.tool-line .annot .ep,body.tool-hl .annot .ep,body.tool-box .annot .ep{pointer-events:none}
+.annot.box{border-radius:0}
+.annot.box.drawing{outline:1.5px dashed var(--accent);outline-offset:0}
+body.tool-text .annot.box{cursor:text}
 .annot.editing .handle{display:none}
 .snip{position:absolute;border:1.5px dashed var(--accent);background:rgba(36,70,181,.08);pointer-events:none;z-index:5}
 .snip-btn{position:absolute;right:-2px;top:calc(100% + 6px);pointer-events:auto;background:var(--accent);color:var(--accent-ink);
@@ -166,6 +169,10 @@ body.tool-line .annot .ep,body.tool-hl .annot .ep{pointer-events:none}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 19L19 5"/></svg>
       <span class="lbl">直線</span>
     </button>
+    <button data-tool="box" title="矩形（B）：拖曳拉出色塊，可以蓋掉不要的地方或當便條寫字">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="6" width="16" height="12" rx="1"/><path d="M4 18L16 6M10 18l10-10" stroke-width="1.4"/></svg>
+      <span class="lbl">矩形</span>
+    </button>
     <button data-tool="hl" title="螢光筆（H），按住 Shift 畫直的">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M14 4l6 6-8 8H6v-6z"/><path d="M4 20h16" stroke-linecap="round"/></svg>
       <span class="lbl">螢光筆</span>
@@ -188,6 +195,15 @@ body.tool-line .annot .ep,body.tool-hl .annot .ep{pointer-events:none}
       <button class="sw" data-color="#15804A" style="background:#15804A" title="綠"></button>
     </span>
     <span class="swset" id="hlSw" hidden>
+      <button class="sw" data-color="#FFE14D" style="background:#FFE14D" title="黃"></button>
+      <button class="sw" data-color="#8BEA8F" style="background:#8BEA8F" title="綠"></button>
+      <button class="sw" data-color="#FF9BCB" style="background:#FF9BCB" title="粉紅"></button>
+      <button class="sw" data-color="#86CBFF" style="background:#86CBFF" title="藍"></button>
+    </span>
+    <span class="swset" id="boxSw" hidden>
+      <button class="sw" data-color="#FFFFFF" style="background:#FFFFFF" title="白"></button>
+      <button class="sw" data-color="#000000" style="background:#000000" title="黑"></button>
+      <button class="sw" data-color="#BFBFBF" style="background:#BFBFBF" title="灰"></button>
       <button class="sw" data-color="#FFE14D" style="background:#FFE14D" title="黃"></button>
       <button class="sw" data-color="#8BEA8F" style="background:#8BEA8F" title="綠"></button>
       <button class="sw" data-color="#FF9BCB" style="background:#FF9BCB" title="粉紅"></button>
@@ -229,7 +245,7 @@ body.tool-line .annot .ep,body.tool-hl .annot .ep{pointer-events:none}
         <li>點「文字」後在頁面上點一下就能打字</li>
         <li><code>$x^2$</code> 行內公式，<code>$$\int_0^1 f$$</code> 獨立公式</li>
         <li>截圖後按 <code>Ctrl+V</code>，圖片會貼在滑鼠所在的位置</li>
-        <li>直線（L）和螢光筆（H）可以畫重點</li>
+        <li>直線（L）和螢光筆（H）可以畫重點，矩形（B）可以蓋掉不要的地方或當便條</li>
         <li>選取模式下在空白處拖曳，可以框選截圖</li>
       </ul>
     </div>
@@ -245,6 +261,7 @@ body.tool-line .annot .ep,body.tool-hl .annot .ep{pointer-events:none}
     <dt>LaTeX</dt><dd><code>$…$</code> 行內、<code>$$…$$</code> 獨立；要打錢字號用 <code>\$</code></dd>
     <dt>直線</dt><dd>按 L，拖曳畫線；Shift 鎖定 45° 角</dd>
     <dt>螢光筆</dt><dd>按 H，拖曳塗抹；Shift 畫直的</dd>
+    <dt>矩形</dt><dd>按 B，拖曳拉出色塊；白、黑可以蓋掉內容，彩色可以當便條在上面打字</dd>
     <dt>貼圖片</dt><dd>Ctrl+V，貼在滑鼠位置</dd>
     <dt>貼文字</dt><dd>沒在編輯時 Ctrl+V，會變成新的文字框</dd>
     <dt>移動</dt><dd>拖曳，或用方向鍵（Shift 一次 10 點）</dd>
@@ -339,7 +356,7 @@ const S = {
   bytes: null, name: 'document', pdf: null, pages: [], annots: [],
   zoom: 1, tool: 'select', sel: null, editing: null, editSnap: null, editNew: false, editOrig: '',
   undo: [], redo: [], dirty: false, hover: null, textSize: 16, textColor: '#1A1A1A',
-  lineWidth: 2, lineColor: '#1A1A1A', hlWidth: 14, hlColor: '#FFE14D', nextId: 1,
+  lineWidth: 2, lineColor: '#1A1A1A', hlWidth: 14, hlColor: '#FFE14D', boxColor: '#FFFFFF', nextId: 1,
   saveHandle: null
 };
 // 存檔時把原始 PDF 與筆記資料當附件放進輸出檔，重新開啟就能繼續編輯
@@ -621,8 +638,9 @@ function applyGeom(a) {
     return;
   }
   el.style.left = a.x * z + 'px'; el.style.top = a.y * z + 'px';
-  if (a.type === 'image') {
+  if (a.type === 'image' || a.type === 'box') {
     el.style.width = a.w * z + 'px'; el.style.height = a.h * z + 'px';
+    if (a.type === 'box') el.style.background = a.color;
   } else {
     el.style.fontSize = a.size * z + 'px'; el.style.color = a.color;
     if (a.w) { el.style.width = a.w * z + 'px'; el.style.maxWidth = ''; }
@@ -651,7 +669,7 @@ function createEl(a) {
   if (a.type === 'image') {
     const img = document.createElement('img'); img.src = a.src; img.alt = ''; img.draggable = false;
     el.append(img);
-  } else {
+  } else if (a.type !== 'box') {
     const tx = document.createElement('div'); tx.className = 'tx'; tx.spellcheck = false;
     el.append(tx);
   }
@@ -687,6 +705,7 @@ function select(id) {
     if (a && a.type === 'text') { S.textSize = a.size; S.textColor = a.color; }
     else if (a && a.type === 'line') { S.lineWidth = a.width; S.lineColor = a.color; }
     else if (a && a.type === 'hl') { S.hlWidth = a.width; S.hlColor = a.color; }
+    else if (a && a.type === 'box') S.boxColor = a.color;
   }
   syncFmt(); updButtons();
 }
@@ -745,6 +764,30 @@ function addText(pi, pt, text = '') {
 }
 
 /* pointer interactions */
+function startBox(e, pi) {
+  if (S.editing) finishEdit();
+  select(null);
+  const p = S.pages[pi], ov = p.ov, snap = snapshot(), st = toPt(e, pi);
+  const a = { id: S.nextId++, type: 'box', page: pi, x: st.x, y: st.y, w: 0, h: 0, color: S.boxColor };
+  S.annots.push(a); createEl(a).classList.add('drawing');
+  try { ov.setPointerCapture(e.pointerId); } catch (err) {}
+  const move = ev => {
+    const q = toPt(ev, pi);
+    const x1 = clamp(Math.min(st.x, q.x), 0, p.w), y1 = clamp(Math.min(st.y, q.y), 0, p.h);
+    const x2 = clamp(Math.max(st.x, q.x), 0, p.w), y2 = clamp(Math.max(st.y, q.y), 0, p.h);
+    Object.assign(a, { x: x1, y: y1, w: x2 - x1, h: y2 - y1 });
+    applyGeom(a);
+  };
+  const up = () => {
+    ov.removeEventListener('pointermove', move); ov.removeEventListener('pointerup', up); ov.removeEventListener('pointercancel', up);
+    els.get(a.id)?.classList.remove('drawing');
+    if (a.w < 2 || a.h < 2) {
+      S.annots = S.annots.filter(x => x !== a); els.get(a.id)?.remove(); els.delete(a.id); return;
+    }
+    pushUndo(snap); markDirty();
+  };
+  ov.addEventListener('pointermove', move); ov.addEventListener('pointerup', up); ov.addEventListener('pointercancel', up);
+}
 function startDraw(e, pi) {
   if (S.editing) finishEdit();
   select(null);
@@ -783,6 +826,7 @@ function startDraw(e, pi) {
 function onOverlayDown(e, pi) {
   clearSnip();
   if ((S.tool === 'line' || S.tool === 'hl') && e.button === 0) { e.preventDefault(); startDraw(e, pi); return; }
+  if (S.tool === 'box' && e.button === 0) { e.preventDefault(); startBox(e, pi); return; }
   if (e.target !== S.pages[pi].ov) return;
   const wasEditing = !!S.editing;
   if (S.editing) finishEdit();
@@ -880,6 +924,8 @@ function onAnnotDown(e, id) {
   if (S.editing) finishEdit();
   const a = get(id); if (!a) return;
   if (S.tool === 'text' && a.type === 'text') { startEdit(id); return; }
+  // 文字模式點在矩形上：直接在上面打字（當便條用）
+  if (S.tool === 'text' && a.type === 'box' && e.button === 0) { addText(a.page, toPt(e, a.page)); return; }
   const wasSel = S.sel === id;
   select(id);
   const cap = e.target;
@@ -908,7 +954,7 @@ function onResizeDown(e, id) {
   e.stopPropagation(); e.preventDefault();
   const a = get(id), el = els.get(id), h = e.target; if (!a) return;
   const p = S.pages[a.page], snap = snapshot(), sx = e.clientX, sy = e.clientY;
-  const ow = a.type === 'image' ? a.w : el.getBoundingClientRect().width / S.zoom;
+  const ow = a.type === 'image' || a.type === 'box' ? a.w : el.getBoundingClientRect().width / S.zoom, oh = a.h;
   const ratio = a.type === 'image' ? a.h / a.w : 1;
   let moved = false;
   try { h.setPointerCapture(e.pointerId); } catch (err) {}
@@ -918,6 +964,8 @@ function onResizeDown(e, id) {
     if (a.type === 'image') {
       const d = Math.abs(dx) > Math.abs(dy / ratio) ? dx : dy / ratio;
       a.w = clamp(ow + d, 12, p.w - a.x + 40); a.h = a.w * ratio;
+    } else if (a.type === 'box') {
+      a.w = clamp(ow + dx, 2, p.w - a.x); a.h = clamp(oh + dy, 2, p.h - a.y);
     } else a.w = clamp(ow + dx, 24, p.w - a.x);
     applyGeom(a);
   };
@@ -953,19 +1001,22 @@ function setTool(t) {
   S.tool = t;
   document.body.className = 'tool-' + t;
   document.querySelectorAll('[data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
-  if (t === 'line' || t === 'hl') select(null); else syncFmt();
+  if (t === 'line' || t === 'hl' || t === 'box') select(null); else syncFmt();
 }
-const FMT = { text: ['textSize', 'textColor', '字'], line: ['lineWidth', 'lineColor', '線'], hl: ['hlWidth', 'hlColor', '筆'] };
+const FMT = { text: ['textSize', 'textColor', '字'], line: ['lineWidth', 'lineColor', '線'], hl: ['hlWidth', 'hlColor', '筆'],
+  box: [null, 'boxColor', ''] };
 function fmtKind() {
   const a = S.sel && get(S.sel);
   if (a) return a.type === 'image' ? null : a.type;
-  return S.tool === 'line' || S.tool === 'hl' ? S.tool : 'text';
+  return S.tool === 'line' || S.tool === 'hl' || S.tool === 'box' ? S.tool : 'text';
 }
 function syncFmt() {
   const k = fmtKind(), kk = k || 'text', [sk, ck, lbl] = FMT[kk];
   $('#fmt').classList.toggle('off', !k);
-  $('#sizeVal').textContent = lbl + ' ' + S[sk];
-  $('#inkSw').hidden = kk === 'hl'; $('#hlSw').hidden = kk !== 'hl';
+  // 矩形只有顏色，沒有粗細
+  ['#sizeDown', '#sizeVal', '#sizeUp'].forEach(s => $(s).style.display = kk === 'box' ? 'none' : '');
+  if (sk) $('#sizeVal').textContent = lbl + ' ' + S[sk];
+  $('#inkSw').hidden = kk === 'hl' || kk === 'box'; $('#hlSw').hidden = kk !== 'hl'; $('#boxSw').hidden = kk !== 'box';
   document.querySelectorAll('.sw').forEach(b => b.classList.toggle('on', b.dataset.color.toLowerCase() === S[ck].toLowerCase()));
 }
 function stepVal(k, cur, dir) {
@@ -977,12 +1028,13 @@ function stepVal(k, cur, dir) {
 function applyFmt({ dir, color }) {
   const k = fmtKind(); if (!k) return;
   const [sk, ck] = FMT[k];
+  if (dir && !sk) return;
   if (dir) S[sk] = stepVal(k, S[sk], dir);
   if (color) S[ck] = color;
   const a = S.sel && get(S.sel);
   if (a && a.type === k) {
     if (!S.editing) pushUndo(snapshot());
-    if (k === 'text') a.size = S[sk]; else a.width = S[sk];
+    if (k === 'text') a.size = S[sk]; else if (sk) a.width = S[sk];
     a.color = S[ck];
     applyGeom(a); markDirty();
   }
@@ -1069,6 +1121,7 @@ document.addEventListener('keydown', e => {
   else if (!mod && (k === 'v' || k === 'V')) setTool('select');
   else if (!mod && (k === 'l' || k === 'L')) setTool('line');
   else if (!mod && (k === 'h' || k === 'H')) setTool('hl');
+  else if (!mod && (k === 'b' || k === 'B')) setTool('box');
   else if (S.sel && k.startsWith('Arrow')) {
     e.preventDefault();
     const a = get(S.sel), d = e.shiftKey ? 10 : 1;
@@ -1093,6 +1146,7 @@ async function rasterize(pi, list, SC) {
       ctx.drawImage(img, a.x * SC, a.y * SC, a.w * SC, a.h * SC);
       continue;
     }
+    if (a.type === 'box') { ctx.fillStyle = a.color; ctx.fillRect(a.x * SC, a.y * SC, a.w * SC, a.h * SC); continue; }
     if (isStroke(a)) {
       ctx.save();
       ctx.strokeStyle = a.color; ctx.lineWidth = a.width * SC; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
