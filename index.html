@@ -1264,42 +1264,95 @@ async function rasterize(pi, list, SC) {
       ctx.stroke(); ctx.restore();
       continue;
     }
-    const el = els.get(a.id); if (!el) continue;
-    const tx = el.querySelector('.tx'), cs = getComputedStyle(tx);
-    ctx.fillStyle = a.color; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
-    ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * f}px ${cs.fontFamily}`;
-    const walker = document.createTreeWalker(tx, NodeFilter.SHOW_TEXT, {
-      acceptNode: n => n.parentElement && n.parentElement.closest('mjx-container') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
-    });
-    const range = document.createRange();
-    let n;
-    while ((n = walker.nextNode())) {
-      const s = n.data;
-      for (let i = 0; i < s.length;) {
-        const len = s.codePointAt(i) > 0xffff ? 2 : 1;
-        const ch = s.slice(i, i + len);
-        if (!/\s/.test(ch)) {
-          range.setStart(n, i); range.setEnd(n, i + len);
-          const r = range.getBoundingClientRect();
-          if (r.width || r.height) ctx.fillText(ch, (r.left - ovRect.left) * f, (r.top + r.height / 2 - ovRect.top) * f);
-        }
-        i += len;
-      }
-    }
-    for (const svg of tx.querySelectorAll('mjx-container > svg')) {
-      const r = svg.getBoundingClientRect();
-      if (!r.width || !r.height) continue;
-      const clone = svg.cloneNode(true);
-      clone.setAttribute('width', r.width * f); clone.setAttribute('height', r.height * f);
-      clone.removeAttribute('style');
-      const str = new XMLSerializer().serializeToString(clone).replace(/currentColor/g, a.color);
-      try {
-        const img = await loadImg('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(str));
-        ctx.drawImage(img, (r.left - ovRect.left) * f, (r.top - ovRect.top) * f, r.width * f, r.height * f);
-      } catch (err) { console.warn('公式轉換失敗', err); }
-    }
+    await drawText(ctx, a, f, ovRect.left, ovRect.top);
   }
   return c;
+}
+// 把一個文字筆記畫到 ctx；(ox, oy) 是畫布原點在螢幕上的位置，f 是螢幕像素到畫布像素的倍率
+async function drawText(ctx, a, f, ox, oy) {
+  const el = els.get(a.id); if (!el) return;
+  const tx = el.querySelector('.tx'), cs = getComputedStyle(tx);
+  ctx.fillStyle = a.color; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${parseFloat(cs.fontSize) * f}px ${cs.fontFamily}`;
+  const walker = document.createTreeWalker(tx, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => n.parentElement && n.parentElement.closest('mjx-container') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+  });
+  const range = document.createRange();
+  let n;
+  while ((n = walker.nextNode())) {
+    const s = n.data;
+    for (let i = 0; i < s.length;) {
+      const len = s.codePointAt(i) > 0xffff ? 2 : 1;
+      const ch = s.slice(i, i + len);
+      if (!/\s/.test(ch)) {
+        range.setStart(n, i); range.setEnd(n, i + len);
+        const r = range.getBoundingClientRect();
+        if (r.width || r.height) ctx.fillText(ch, (r.left - ox) * f, (r.top + r.height / 2 - oy) * f);
+      }
+      i += len;
+    }
+  }
+  for (const svg of tx.querySelectorAll('mjx-container > svg')) {
+    const r = svg.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('width', r.width * f); clone.setAttribute('height', r.height * f);
+    clone.removeAttribute('style');
+    const str = new XMLSerializer().serializeToString(clone).replace(/currentColor/g, a.color);
+    try {
+      const img = await loadImg('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(str));
+      ctx.drawImage(img, (r.left - ox) * f, (r.top - oy) * f, r.width * f, r.height * f);
+    } catch (err) { console.warn('公式轉換失敗', err); }
+  }
+}
+/* 每個筆記各自放進 PDF：線、螢光筆、矩形畫成向量；圖片和文字各自轉成剛好大小的點陣圖。
+   點陣圖用瀏覽器內建的 CompressionStream 壓縮（比 pdf-lib 的 JS 版 PNG 快很多），結果快取起來，
+   沒改過的筆記下次存檔就不用重算 */
+const rasterCache = new Map();
+async function deflate(u8) {
+  const st = new Blob([u8]).stream().pipeThrough(new CompressionStream('deflate'));
+  return new Uint8Array(await new Response(st).arrayBuffer());
+}
+async function canvasToRaw(c) {
+  const w = c.width, h = c.height, d = c.getContext('2d').getImageData(0, 0, w, h).data;
+  const rgb = new Uint8Array(w * h * 3), al = new Uint8Array(w * h);
+  let opaque = true;
+  for (let i = 0, j = 0, k = 0; i < d.length; i += 4, k++) {
+    rgb[j++] = d[i]; rgb[j++] = d[i + 1]; rgb[j++] = d[i + 2];
+    if ((al[k] = d[i + 3]) !== 255) opaque = false;
+  }
+  return { w, h, rgb: await deflate(rgb), alpha: opaque ? null : await deflate(al) };
+}
+async function imageRaw(src) {
+  const img = await loadImg(src), c = document.createElement('canvas');
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  c.getContext('2d').drawImage(img, 0, 0);
+  return canvasToRaw(c);
+}
+// 文字筆記：只畫它自己那一塊，pos 是在頁面上的位置（頁面座標）
+async function textRaw(a) {
+  const el = els.get(a.id), tx = el && el.querySelector('.tx'); if (!tx) return null;
+  const z = S.zoom, ov = S.pages[a.page].ov.getBoundingClientRect(), r = tx.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const pad = a.size * 0.3;
+  const pos = { x: (r.left - ov.left) / z - pad, y: (r.top - ov.top) / z - pad, w: r.width / z + 2 * pad, h: r.height / z + 2 * pad };
+  const key = JSON.stringify(['t', a.text, a.size, a.color, Math.round(pos.w * 4), Math.round(pos.h * 4)]);
+  let raw = rasterCache.get(key);
+  if (!raw) {
+    const SC = Math.min(3, Math.sqrt(8e6 / (pos.w * pos.h)));
+    const c = document.createElement('canvas');
+    c.width = Math.ceil(pos.w * SC); c.height = Math.ceil(pos.h * SC);
+    await drawText(c.getContext('2d'), a, SC / z, ov.left + pos.x * z, ov.top + pos.y * z);
+    raw = await canvasToRaw(c);
+  }
+  return { key, raw, pos };
+}
+function embedRaw(doc, r) {
+  const ctx = doc.context;
+  const base = { Type: 'XObject', Subtype: 'Image', Width: r.w, Height: r.h, BitsPerComponent: 8, Filter: 'FlateDecode' };
+  const dict = { ...base, ColorSpace: 'DeviceRGB' };
+  if (r.alpha) dict.SMask = ctx.register(ctx.stream(r.alpha, { ...base, ColorSpace: 'DeviceGray' }));
+  return ctx.register(ctx.stream(r.rgb, dict));
 }
 let exporting = false;
 // 先拿到要寫入的檔案（選位置要在使用者點擊後馬上做），再產生 PDF
@@ -1323,37 +1376,53 @@ async function exportPdf(saveAs = false) {
     if (target === 'cancel') { toast('已取消儲存'); return; }
     toast('正在產生 PDF…', 60000);
     await mjChain;
-    const { PDFDocument, degrees, rgb, BlendMode, LineCapStyle } = PDFLib;
+    const { PDFDocument, rgb, BlendMode, LineCapStyle, pushGraphicsState, popGraphicsState,
+      concatTransformationMatrix, drawObject } = PDFLib;
     const hex = c => { const n = parseInt(c.slice(1), 16); return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
     const doc = await PDFDocument.load(S.bytes, { ignoreEncryption: true });
     const pages = doc.getPages();
     const byPage = new Map();
     S.annots.forEach(a => { if (!byPage.has(a.page)) byPage.set(a.page, []); byPage.get(a.page).push(a); });
+    const used = new Map(), imgRefs = new Map();
+    const cached = async (key, make) => {
+      let raw = used.get(key) || rasterCache.get(key);
+      if (!raw) raw = await make();
+      used.set(key, raw);
+      return raw;
+    };
     for (const [pi, all] of byPage) {
-      const p = S.pages[pi];
-      const pg = pages[pi], cb = pg.getCropBox();
-      const rot = (((pg.getRotation().angle || 0) % 360) + 360) % 360;
-      let list = all;
-      if (rot === 0) {
-        // highlighter as real vector strokes with multiply blending, so the PDF text stays crisp
-        for (const h of all.filter(a => a.type === 'hl')) {
-          pg.drawSvgPath(strokePath(h), { x: cb.x, y: cb.y + cb.height, borderColor: hex(h.color),
-            borderWidth: h.width, borderLineCap: LineCapStyle.Round, blendMode: BlendMode.Multiply });
+      const p = S.pages[pi], pg = pages[pi], H = p.h;
+      // 畫面座標（左上原點、y 往下）→ PDF 座標：用 pdf.js 的 viewport 反推，旋轉過的頁面也一樣適用；
+      // 再上下翻轉，讓下面可以用「左下原點、y 往上」的畫面座標畫
+      const vt = p.page.getViewport({ scale: 1 }).transform;
+      const m = pdfjsLib.Util.transform(pdfjsLib.Util.inverseTransform(vt), [1, 0, 0, -1, 0, H]);
+      pg.pushOperators(pushGraphicsState(), concatTransformationMatrix(...m));
+      const putImage = (ref, x, y, w, h) => {
+        const name = pg.node.newXObject('Image', ref);
+        pg.pushOperators(pushGraphicsState(), concatTransformationMatrix(w, 0, 0, h, x, H - y - h), drawObject(name), popGraphicsState());
+      };
+      // 螢光筆墊在最底下，用 multiply 疊，底下的字才不會被蓋掉
+      const ordered = [...all.filter(a => a.type === 'hl'), ...all.filter(a => a.type !== 'hl')];
+      for (const a of ordered) {
+        if (isStroke(a)) {
+          pg.drawSvgPath(strokePath(a), { x: 0, y: H, borderColor: hex(a.color), borderWidth: a.width,
+            borderLineCap: LineCapStyle.Round, blendMode: a.type === 'hl' ? BlendMode.Multiply : undefined });
+        } else if (a.type === 'box') {
+          pg.drawRectangle({ x: a.x, y: H - a.y - a.h, width: a.w, height: a.h, color: hex(a.color) });
+        } else if (a.type === 'image') {
+          const key = 'i' + a.src;
+          if (!imgRefs.has(key)) imgRefs.set(key, embedRaw(doc, await cached(key, () => imageRaw(a.src))));
+          putImage(imgRefs.get(key), a.x, a.y, a.w, a.h);
+        } else {
+          const t = await textRaw(a); if (!t) continue;
+          const raw = await cached(t.key, () => t.raw);
+          putImage(embedRaw(doc, raw), t.pos.x, t.pos.y, t.pos.w, t.pos.h);
         }
-        list = all.filter(a => a.type !== 'hl');
       }
-      if (!list.length) continue;
-      const SC = Math.min(3, Math.sqrt(24e6 / (p.w * p.h)));
-      const canvas = await rasterize(pi, list, SC);
-      const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-      const png = await doc.embedPng(new Uint8Array(await blob.arrayBuffer()));
-      let o;
-      if (rot === 90) o = { x: cb.x + cb.width, y: cb.y, width: cb.height, height: cb.width, rotate: degrees(90) };
-      else if (rot === 180) o = { x: cb.x + cb.width, y: cb.y + cb.height, width: cb.width, height: cb.height, rotate: degrees(180) };
-      else if (rot === 270) o = { x: cb.x, y: cb.y + cb.height, width: cb.height, height: cb.width, rotate: degrees(270) };
-      else o = { x: cb.x, y: cb.y, width: cb.width, height: cb.height };
-      pg.drawImage(png, o);
+      pg.pushOperators(popGraphicsState());
     }
+    // 只留這次用到的，避免快取越長越大
+    rasterCache.clear(); used.forEach((v, k) => rasterCache.set(k, v));
     await doc.attach(S.bytes, ORIG_NAME, { mimeType: 'application/pdf', description: 'PDF 筆記：原始檔' });
     await doc.attach(new TextEncoder().encode(JSON.stringify({ v: 1, name: S.name, nextId: S.nextId, annots: S.annots })),
       DATA_NAME, { mimeType: 'application/json', description: 'PDF 筆記：可繼續編輯的筆記資料' });
