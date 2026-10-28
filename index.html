@@ -155,6 +155,10 @@ body.tool-text .annot.box{cursor:text}
       <span class="lbl">開啟</span>
     </button>
     <input id="fileIn" type="file" accept="application/pdf,.pdf" hidden>
+    <button id="blankBtn" title="在目前這頁後面加一張空白頁（大小跟這頁一樣）；還沒開檔時會建立一份空白筆記">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M12 11v6M9 14h6"/></svg>
+      <span class="lbl">空白頁</span>
+    </button>
   </div>
   <div class="grp">
     <button data-tool="select" class="on" title="選取與移動（V）；在空白處拖曳可框選截圖">
@@ -240,7 +244,8 @@ body.tool-text .annot.box{cursor:text}
       <h1>開啟一份 PDF 開始做筆記</h1>
       <p>檔案只在你的瀏覽器裡處理，不會上傳。</p>
       <button class="primary" id="openBtn2">選擇 PDF 檔案</button>
-      <span style="color:var(--muted);font-size:13px;margin-left:8px">或直接拖進來</span>
+      <span style="color:var(--muted);font-size:13px;margin-left:8px">或直接拖進來，</span>
+      <button id="blankBtn2" style="color:var(--accent);padding:6px 4px;font-size:13px">建立空白筆記</button>
       <ul>
         <li>點「文字」後在頁面上點一下就能打字</li>
         <li><code>$x^2$</code> 行內公式，<code>$$\int_0^1 f$$</code> 獨立公式</li>
@@ -262,6 +267,7 @@ body.tool-text .annot.box{cursor:text}
     <dt>直線</dt><dd>按 L，拖曳畫線；Shift 鎖定 45° 角</dd>
     <dt>螢光筆</dt><dd>按 H，拖曳塗抹；Shift 畫直的</dd>
     <dt>矩形</dt><dd>按 B，拖曳拉出色塊；白、黑可以蓋掉內容，彩色可以當便條在上面打字</dd>
+    <dt>空白頁</dt><dd>按「空白頁」，在目前這頁後面加一張一樣大的白紙</dd>
     <dt>貼圖片</dt><dd>Ctrl+V，貼在滑鼠位置</dd>
     <dt>貼文字</dt><dd>沒在編輯時 Ctrl+V，會變成新的文字框</dd>
     <dt>移動</dt><dd>拖曳，或用方向鍵（Shift 一次 10 點）</dd>
@@ -448,35 +454,87 @@ async function openFile(file, handle = null) {
         pdf.destroy(); pdf = opdf; buf = ob; saved = meta;
       }
     } catch (err) { console.warn('讀取筆記資料失敗', err); }
-    if (S.pdf) S.pdf.destroy();
-    S.bytes = buf; S.pdf = pdf;
-    S.name = (saved && saved.name) || file.name.replace(/\.pdf$/i, '') || 'document';
+    const name = (saved && saved.name) || file.name.replace(/\.pdf$/i, '') || 'document';
     // Ctrl+S 直接覆蓋開啟的這個檔（原始 PDF 會一起存在檔案裡，之後仍可繼續編輯）
-    S.saveHandle = handle;
-    S.annots = []; S.undo = []; S.redo = []; S.sel = null; S.editing = null; S.dirty = false;
-    els.clear(); S.pages = []; pagesEl.replaceChildren();
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const vp = page.getViewport({ scale: 1 });
-      S.pages.push({ page, w: vp.width, h: vp.height, done: null, pending: null, task: null });
-    }
-    buildPages();
-    const maxW = Math.max(...S.pages.map(p => p.w));
-    S.zoom = clamp(Math.floor(((viewer.clientWidth - 40) / maxW) * 20) / 20, 0.4, 1.6);
-    layout(); viewer.scrollTop = 0;
+    await startDoc(buf, pdf, name, handle);
     if (saved && Array.isArray(saved.annots)) {
       S.annots = saved.annots.filter(a => a && S.pages[a.page]);
       S.nextId = Math.max(saved.nextId || 1, ...S.annots.map(a => a.id + 1));
       S.annots.forEach(createEl);
     }
-    $('#empty').style.display = 'none';
-    document.title = S.name + ' · PDF 筆記';
-    updButtons(); renderVisible();
     toast(saved ? `已開啟，共 ${pdf.numPages} 頁，${S.annots.length} 個筆記可以繼續編輯` : `已開啟，共 ${pdf.numPages} 頁`);
   } catch (err) {
     console.error(err);
     toast('這個檔案無法開啟：' + (err && err.message ? err.message : '格式不正確'), 4000);
   }
+}
+async function startDoc(buf, pdf, name, handle) {
+  S.name = name; S.saveHandle = handle;
+  S.annots = []; S.undo = []; S.redo = []; S.sel = null; S.editing = null; S.dirty = false;
+  await setPdf(buf, pdf);
+  const maxW = Math.max(...S.pages.map(p => p.w));
+  S.zoom = clamp(Math.floor(((viewer.clientWidth - 40) / maxW) * 20) / 20, 0.4, 1.6);
+  layout(); viewer.scrollTop = 0;
+  $('#empty').style.display = 'none';
+  document.title = S.name + ' · PDF 筆記';
+  updButtons(); renderVisible();
+}
+// 換上新的 PDF 內容並重建頁面（筆記的 DOM 也要跟著重建）
+async function setPdf(buf, pdf) {
+  if (S.pdf && S.pdf !== pdf) S.pdf.destroy();
+  S.bytes = buf; S.pdf = pdf;
+  els.forEach(el => el.remove()); els.clear();
+  const pages = [];
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale: 1 });
+    pages.push({ page, w: vp.width, h: vp.height, done: null, pending: null, task: null });
+  }
+  S.pages = pages; pagesEl.replaceChildren();
+  buildPages();
+}
+
+/* ---------- blank pages ---------- */
+// 空白頁直接加進原始 PDF（S.bytes），存檔、重新開啟都跟一般頁面一樣；大小跟目前這頁相同
+let addingPage = false;
+async function addBlankPage() {
+  if (addingPage) return;
+  if (!S.pdf && S.dirty && !confirm('目前的筆記還沒儲存，確定要建立新的空白筆記嗎？')) return;
+  addingPage = true;
+  if (S.editing) finishEdit();
+  clearSnip();
+  try {
+    const { PDFDocument } = PDFLib;
+    if (!S.pdf) {
+      const doc = await PDFDocument.create();
+      doc.addPage([595.28, 841.89]);  // A4
+      const buf = new Uint8Array(await doc.save());
+      await startDoc(buf, await loadPdf(buf), '空白筆記', null);
+      S.dirty = true;
+      toast('已建立空白筆記，可以開始打字了');
+      return;
+    }
+    const cur = mostVisiblePage().pi, at = cur + 1, { w, h } = S.pages[cur];
+    const doc = await PDFDocument.load(S.bytes, { ignoreEncryption: true });
+    doc.insertPage(at, [w, h]);
+    const buf = new Uint8Array(await doc.save());
+    const pdf = await loadPdf(buf);
+    // 後面頁面的筆記（含復原紀錄裡的）往後挪一頁
+    const shift = list => list.forEach(a => { if (a.page >= at) a.page++; });
+    shift(S.annots); S.undo.forEach(shift); S.redo.forEach(shift);
+    const sel = S.sel;
+    await setPdf(buf, pdf);
+    S.annots.forEach(createEl);
+    layout();
+    if (sel && els.get(sel)) select(sel); else select(null);
+    markDirty(); updButtons();
+    S.pages[at].el.scrollIntoView({ block: 'start', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    renderVisible();
+    toast(`已在第 ${at} 頁後面加入空白頁`);
+  } catch (err) {
+    console.error(err);
+    toast('無法加入空白頁：' + (err && err.message ? err.message : '未知錯誤'), 4000);
+  } finally { addingPage = false; }
 }
 
 function buildPages() {
@@ -1053,7 +1111,8 @@ $('#openBtn').onclick = $('#openBtn2').onclick = async () => {
     openFile(await h.getFile(), h);
   } catch (err) { if (err.name !== 'AbortError') $('#fileIn').click(); }
 };
-$('#fileIn').onchange = e => { openFile(e.target.files[0]); e.target.value = ''; };
+$('#blankBtn').onclick = $('#blankBtn2').onclick = addBlankPage;
+$('#fileIn').onchange =e => { openFile(e.target.files[0]); e.target.value = ''; };
 $('#imgBtn').onclick = () => { if (!S.pdf) { toast('先開啟一份 PDF'); return; } $('#imgIn').click(); };
 $('#imgIn').onchange = e => { const f = e.target.files[0]; if (f) insertImage(f, mostVisiblePage()); e.target.value = ''; };
 $('#undoBtn').onclick = undo; $('#redoBtn').onclick = redo;
