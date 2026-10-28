@@ -159,6 +159,10 @@ body.tool-text .annot.box{cursor:text}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M12 11v6M9 14h6"/></svg>
       <span class="lbl">空白頁</span>
     </button>
+    <button id="delPageBtn" title="刪除目前這頁（連同頁上的筆記，可以 Ctrl+Z 復原）" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 14h6"/></svg>
+      <span class="lbl">刪除頁</span>
+    </button>
   </div>
   <div class="grp">
     <button data-tool="select" class="on" title="選取與移動（V）；在空白處拖曳可框選截圖">
@@ -268,6 +272,7 @@ body.tool-text .annot.box{cursor:text}
     <dt>螢光筆</dt><dd>按 H，拖曳塗抹；Shift 畫直的</dd>
     <dt>矩形</dt><dd>按 B，拖曳拉出色塊；白、黑可以蓋掉內容，彩色可以當便條在上面打字</dd>
     <dt>空白頁</dt><dd>按「空白頁」，在目前這頁後面加一張一樣大的白紙</dd>
+    <dt>刪除頁</dt><dd>按「刪除頁」刪掉目前這頁，Ctrl+Z 可以復原</dd>
     <dt>貼圖片</dt><dd>Ctrl+V，貼在滑鼠位置</dd>
     <dt>貼文字</dt><dd>沒在編輯時 Ctrl+V，會變成新的文字框</dd>
     <dt>移動</dt><dd>拖曳，或用方向鍵（Shift 一次 10 點）</dd>
@@ -412,18 +417,38 @@ window.addEventListener('beforeunload', e => { if (S.dirty) { e.preventDefault()
 /* ---------- undo ---------- */
 const snapshot = () => S.annots.map(a => ({ ...a }));
 function pushUndo(s) { S.undo.push(s); if (S.undo.length > 120) S.undo.shift(); S.redo = []; updButtons(); }
-function restore(arr) {
-  S.editing = null;
-  S.annots = arr.map(a => ({ ...a }));
-  els.forEach(el => el.remove()); els.clear();
+// 一般的復原紀錄只存筆記陣列；加頁、刪頁時存 { bytes, annots }，連同當時的 PDF 一起換回去
+const pageSnapshot = () => ({ bytes: S.bytes, annots: snapshot() });
+let pageBusy = false;
+async function restore(s) {
+  S.editing = null; clearSnip();
+  if (Array.isArray(s)) {
+    S.annots = s.map(a => ({ ...a }));
+    els.forEach(el => el.remove()); els.clear();
+  } else {
+    S.annots = s.annots.map(a => ({ ...a }));
+    await setPdf(s.bytes, await loadPdf(s.bytes));
+    layout(); renderVisible();
+  }
   S.annots.forEach(createEl);
   select(null); markDirty(); updButtons();
 }
-function undo() { if (!S.undo.length) return; S.redo.push(snapshot()); restore(S.undo.pop()); }
-function redo() { if (!S.redo.length) return; S.undo.push(snapshot()); restore(S.redo.pop()); }
+async function stepHistory(from, to) {
+  if (!from.length || pageBusy) return;
+  if (S.editing) finishEdit();
+  const s = from.pop();
+  to.push(Array.isArray(s) ? snapshot() : pageSnapshot());
+  pageBusy = true;
+  try { await restore(s); }
+  catch (err) { console.error(err); toast('無法復原：' + (err && err.message ? err.message : '未知錯誤'), 4000); }
+  finally { pageBusy = false; updButtons(); }
+}
+const undo = () => stepHistory(S.undo, S.redo);
+const redo = () => stepHistory(S.redo, S.undo);
 function updButtons() {
   $('#undoBtn').disabled = !S.undo.length;
   $('#redoBtn').disabled = !S.redo.length;
+  $('#delPageBtn').disabled = !S.pdf || S.pages.length < 2;
   $('#delBtn').disabled = !S.sel;
   $('#exportBtn').disabled = $('#saveAsBtn').disabled = !S.pdf;
   $('#exportBtn').title = S.saveHandle ? `儲存到 ${S.saveHandle.name}（Ctrl+S）` : '儲存（Ctrl+S）';
@@ -494,47 +519,69 @@ async function setPdf(buf, pdf) {
   buildPages();
 }
 
-/* ---------- blank pages ---------- */
-// 空白頁直接加進原始 PDF（S.bytes），存檔、重新開啟都跟一般頁面一樣；大小跟目前這頁相同
-let addingPage = false;
-async function addBlankPage() {
-  if (addingPage) return;
-  if (!S.pdf && S.dirty && !confirm('目前的筆記還沒儲存，確定要建立新的空白筆記嗎？')) return;
-  addingPage = true;
+/* ---------- add / delete pages ---------- */
+// 頁面直接改在原始 PDF（S.bytes）上，存檔、重新開啟都跟一般頁面一樣；改之前先把整份存進復原紀錄
+async function editPages(fn) {
+  if (pageBusy) return;
+  pageBusy = true;
   if (S.editing) finishEdit();
   clearSnip();
   try {
-    const { PDFDocument } = PDFLib;
-    if (!S.pdf) {
-      const doc = await PDFDocument.create();
+    const doc = await PDFLib.PDFDocument.load(S.bytes, { ignoreEncryption: true });
+    const { annots, scrollTo, msg } = fn(doc);
+    const buf = new Uint8Array(await doc.save());
+    const pdf = await loadPdf(buf);
+    pushUndo(pageSnapshot());
+    const sel = S.sel;
+    S.annots = annots;
+    await setPdf(buf, pdf);
+    S.annots.forEach(createEl);
+    layout();
+    select(sel && els.get(sel) ? sel : null);
+    markDirty(); updButtons();
+    S.pages[scrollTo].el.scrollIntoView({ block: 'start', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    renderVisible();
+    toast(msg);
+  } catch (err) {
+    console.error(err);
+    toast('無法修改頁面：' + (err && err.message ? err.message : '未知錯誤'), 4000);
+  } finally { pageBusy = false; updButtons(); }
+}
+// 在目前這頁後面加一張一樣大的空白頁；還沒開檔就建立一份 A4 空白筆記
+async function addBlankPage() {
+  if (!S.pdf) {
+    if (pageBusy || (S.dirty && !confirm('目前的筆記還沒儲存，確定要建立新的空白筆記嗎？'))) return;
+    pageBusy = true;
+    try {
+      const doc = await PDFLib.PDFDocument.create();
       doc.addPage([595.28, 841.89]);  // A4
       const buf = new Uint8Array(await doc.save());
       await startDoc(buf, await loadPdf(buf), '空白筆記', null);
       S.dirty = true;
       toast('已建立空白筆記，可以開始打字了');
-      return;
-    }
-    const cur = mostVisiblePage().pi, at = cur + 1, { w, h } = S.pages[cur];
-    const doc = await PDFDocument.load(S.bytes, { ignoreEncryption: true });
+    } catch (err) {
+      console.error(err);
+      toast('無法建立空白筆記：' + (err && err.message ? err.message : '未知錯誤'), 4000);
+    } finally { pageBusy = false; updButtons(); }
+    return;
+  }
+  const cur = mostVisiblePage().pi, at = cur + 1, { w, h } = S.pages[cur];
+  await editPages(doc => {
     doc.insertPage(at, [w, h]);
-    const buf = new Uint8Array(await doc.save());
-    const pdf = await loadPdf(buf);
-    // 後面頁面的筆記（含復原紀錄裡的）往後挪一頁
-    const shift = list => list.forEach(a => { if (a.page >= at) a.page++; });
-    shift(S.annots); S.undo.forEach(shift); S.redo.forEach(shift);
-    const sel = S.sel;
-    await setPdf(buf, pdf);
-    S.annots.forEach(createEl);
-    layout();
-    if (sel && els.get(sel)) select(sel); else select(null);
-    markDirty(); updButtons();
-    S.pages[at].el.scrollIntoView({ block: 'start', behavior: reduceMotion.matches ? 'auto' : 'smooth' });
-    renderVisible();
-    toast(`已在第 ${at} 頁後面加入空白頁`);
-  } catch (err) {
-    console.error(err);
-    toast('無法加入空白頁：' + (err && err.message ? err.message : '未知錯誤'), 4000);
-  } finally { addingPage = false; }
+    // 後面頁面的筆記往後挪一頁
+    const annots = snapshot().map(a => a.page >= at ? { ...a, page: a.page + 1 } : a);
+    return { annots, scrollTo: at, msg: `已在第 ${at} 頁後面加入空白頁` };
+  });
+}
+// 刪掉目前這頁（連同頁上的筆記），可以 Ctrl+Z 復原
+async function deletePage() {
+  if (!S.pdf || S.pages.length < 2) { toast('至少要留一頁'); return; }
+  const at = mostVisiblePage().pi;
+  await editPages(doc => {
+    doc.removePage(at);
+    const annots = snapshot().filter(a => a.page !== at).map(a => a.page > at ? { ...a, page: a.page - 1 } : a);
+    return { annots, scrollTo: Math.min(at, S.pages.length - 2), msg: `已刪除第 ${at + 1} 頁（Ctrl+Z 可以復原）` };
+  });
 }
 
 function buildPages() {
@@ -1112,6 +1159,7 @@ $('#openBtn').onclick = $('#openBtn2').onclick = async () => {
   } catch (err) { if (err.name !== 'AbortError') $('#fileIn').click(); }
 };
 $('#blankBtn').onclick = $('#blankBtn2').onclick = addBlankPage;
+$('#delPageBtn').onclick = deletePage;
 $('#fileIn').onchange =e => { openFile(e.target.files[0]); e.target.value = ''; };
 $('#imgBtn').onclick = () => { if (!S.pdf) { toast('先開啟一份 PDF'); return; } $('#imgIn').click(); };
 $('#imgIn').onchange = e => { const f = e.target.files[0]; if (f) insertImage(f, mostVisiblePage()); e.target.value = ''; };
