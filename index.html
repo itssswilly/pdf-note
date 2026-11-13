@@ -58,7 +58,7 @@ button svg{width:17px;height:17px;flex:none}
 
 /* viewer */
 #viewer{flex:1;overflow:auto;position:relative;-webkit-overflow-scrolling:touch}
-#pages{display:flex;flex-direction:column;align-items:center;gap:18px;padding:24px 16px 80px;min-width:max-content}
+#pages{display:flex;flex-direction:column;align-items:center;gap:18px;padding:24px 16px 80px;min-width:max-content;transform-origin:0 0}
 .page{position:relative;background:#fff;box-shadow:0 1px 2px rgba(20,30,50,.18),0 6px 18px rgba(20,30,50,.10);flex:none}
 .page .cv{position:absolute;inset:0}
 .page .cv canvas{width:100%;height:100%;display:block}
@@ -506,6 +506,7 @@ async function startDoc(buf, pdf, name, handle) {
 }
 // 換上新的 PDF 內容並重建頁面（筆記的 DOM 也要跟著重建）
 async function setPdf(buf, pdf) {
+  resetZoomPreview(); renderQueue = [];
   if (S.pdf && S.pdf !== pdf) S.pdf.destroy();
   S.bytes = buf; S.pdf = pdf;
   els.forEach(el => el.remove()); els.clear();
@@ -599,13 +600,38 @@ function buildPages() {
 
 function layout() {
   const z = S.zoom;
-  S.pages.forEach(p => { p.el.style.width = p.w * z + 'px'; p.el.style.height = p.h * z + 'px'; p.done = null; });
+  S.pages.forEach(p => {
+    p.el.style.width = p.w * z + 'px'; p.el.style.height = p.h * z + 'px'; p.done = null;
+    if (p.task) { try { p.task.cancel(); } catch (e) {} }  // 舊倍率還沒畫完的就不用畫了
+  });
   S.annots.forEach(applyGeom);
   placeSnip();
   $('#zoomVal').textContent = Math.round(z * 100) + '%';
 }
 
 /* ---------- render pages ---------- */
+// 參考 pdf.js 的 PDFRenderingQueue / PDFPageViewBuffer：
+// 1) 一次只畫一頁，畫面上露出最多的那頁先畫，再畫上下鄰頁（捲動時已經準備好）；
+//    以前是把附近幾頁同時丟給 worker，看得到的那頁常常排在看不到的後面。
+// 2) 離畫面太遠的頁面把 canvas 釋放掉。放大時一頁可達 16MP（約 64MB），
+//    以前從不釋放，翻久了記憶體 / GPU 記憶體一路長大，縮放捲動都會越來越卡。
+const RENDER_AHEAD = 900;  // 視窗外多遠以內要預先畫好（px）
+let renderQueue = [], renderBusy = false;
+function freeCanvas(c) { if (c) { c.width = 0; c.height = 0; } }  // 歸零尺寸可讓瀏覽器立刻放掉圖像記憶體
+function releasePage(p) {
+  if (p.task) return;
+  const c = p.cv.firstChild;
+  if (c) { p.cv.replaceChildren(); freeCanvas(c); }
+  p.done = null;
+}
+async function pumpRender() {
+  if (renderBusy || zoomSettle) return;
+  const p = renderQueue.find(p => p.done !== S.zoom && p.pending !== S.zoom);
+  if (!p) return;
+  renderBusy = true;
+  try { await renderPage(p); } finally { renderBusy = false; }
+  pumpRender();
+}
 async function renderPage(p) {
   const z = S.zoom;
   if (p.done === z || p.pending === z) return;
@@ -622,21 +648,31 @@ async function renderPage(p) {
   try {
     await task.promise;
     if (p.pending !== z || S.zoom !== z) return;
-    p.cv.replaceChildren(c); p.done = z;
-  } catch (e) { /* cancelled */ }
+    const old = p.cv.firstChild;
+    p.cv.replaceChildren(c); p.done = z; freeCanvas(old);
+  } catch (e) { freeCanvas(c); /* cancelled */ }
   finally { if (p.pending === z) { p.pending = null; p.task = null; } }
 }
 function renderVisible() {
   if (!S.pdf) return;
   const vr = viewer.getBoundingClientRect();
+  const keep = Math.max(vr.height * 2, 2000);  // 超過這個距離就釋放 canvas
   let best = -1, bestArea = 0;
+  const want = [];
   S.pages.forEach((p, i) => {
     const r = p.el.getBoundingClientRect();
-    if (!zoomSettle && r.bottom > vr.top - 900 && r.top < vr.bottom + 900) renderPage(p);
     const area = Math.max(0, Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top));
     if (area > bestArea) { bestArea = area; best = i; }
+    if (zoomSettle) return;  // 縮放預覽中（套著 transform）先不排程、不釋放
+    const dist = area > 0 ? -area : Math.min(Math.abs(r.top - vr.bottom), Math.abs(vr.top - r.bottom));
+    if (r.bottom > vr.top - RENDER_AHEAD && r.top < vr.bottom + RENDER_AHEAD) want.push({ p, dist });
+    else if (r.bottom < vr.top - keep || r.top > vr.bottom + keep) releasePage(p);
   });
   if (best >= 0) $('#pageVal').textContent = `${best + 1} / ${S.pages.length}`;
+  if (zoomSettle) return;
+  // 露出面積越大越先畫；看不到的依距離由近到遠
+  renderQueue = want.sort((a, b) => a.dist - b.dist).map(w => w.p);
+  pumpRender();
 }
 let scrollRaf = 0;
 viewer.addEventListener('scroll', () => { if (!scrollRaf) scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; renderVisible(); }); });
@@ -656,25 +692,55 @@ function mostVisiblePage() {
 }
 
 /* ---------- zoom ---------- */
-// 縮放時先用 CSS 拉伸現有畫面、逐格平滑過渡，停下來後才重新算出清晰的頁面
+// 縮放進行中只對整個 #pages 套 CSS transform（交給 GPU，不重排版面、不動筆記），
+// 手指停下來後才真正改 S.zoom、重排版面並重新算出清晰的頁面。
+// 以前每一格都 layout() + 重設所有筆記位置 + 讀每頁的 getBoundingClientRect，觸控板捏合時會非常卡。
 let zoomSettle = 0, zTarget = 1, zAnchor = [0, 0], zRaf = 0;
+let zView = null, zTx = 0, zTy = 0;  // 預覽中的視覺倍率與位移；null 代表沒有在預覽
+const curZoom = () => zView ?? S.zoom;
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 function applyZoom(z, cx, cy) {
-  if (z === S.zoom) return;
-  // 以游標（或畫面中央）下方那一點為中心縮放
+  if (z === curZoom()) return;
+  if (zView == null) { zTx = zTy = 0; pagesEl.style.willChange = 'transform'; }
+  const s0 = curZoom() / S.zoom, s1 = z / S.zoom;
+  // #pages 未變形時左上角的螢幕座標
+  const vr = viewer.getBoundingClientRect();
+  const u = cx - (vr.left + viewer.clientLeft + pagesEl.offsetLeft - viewer.scrollLeft);
+  const v = cy - (vr.top + viewer.clientTop + pagesEl.offsetTop - viewer.scrollTop);
+  // 讓游標（或畫面中央）下方那一點保持不動
+  zTx = u - (u - zTx) * s1 / s0;
+  zTy = v - (v - zTy) * s1 / s0;
+  zView = z;
+  pagesEl.style.transform = `translate(${zTx}px,${zTy}px) scale(${s1})`;
+  $('#zoomVal').textContent = Math.round(z * 100) + '%';
+  clearTimeout(zoomSettle);
+  zoomSettle = setTimeout(commitZoom, 150);
+}
+function resetZoomPreview() {
+  if (zRaf) { cancelAnimationFrame(zRaf); zRaf = 0; }
+  clearTimeout(zoomSettle); zoomSettle = 0;
+  zView = null; pagesEl.style.transform = ''; pagesEl.style.willChange = '';
+}
+function commitZoom() {
+  if (zRaf) { zoomSettle = setTimeout(commitZoom, 50); return; }
+  zoomSettle = 0;
+  if (zView == null) return;
+  const z = zView, [cx, cy] = zAnchor;
+  // 用目前（已變形）的畫面找出錨點在頁面上的位置
   const p = S.pages.find(p => { const r = p.el.getBoundingClientRect(); return cy >= r.top && cy <= r.bottom + 18; })
     || S.pages[mostVisiblePage().pi];
+  if (!p) { resetZoomPreview(); return; }
   const r = p.el.getBoundingClientRect();
-  const px = (cx - r.left) / S.zoom, py = (cy - r.top) / S.zoom;
+  const px = (cx - r.left) / z, py = (cy - r.top) / z;
+  zView = null; pagesEl.style.transform = ''; pagesEl.style.willChange = '';
   S.zoom = z; layout();
   const r2 = p.el.getBoundingClientRect();
   viewer.scrollLeft += r2.left + px * z - cx;
   viewer.scrollTop += r2.top + py * z - cy;
-  clearTimeout(zoomSettle);
-  zoomSettle = setTimeout(() => { zoomSettle = 0; renderVisible(); }, 150);
+  renderVisible();
 }
 function zStep() {
-  const cur = Math.log(S.zoom), tgt = Math.log(zTarget);
+  const cur = Math.log(curZoom()), tgt = Math.log(zTarget);
   const next = Math.abs(tgt - cur) < 0.003 ? zTarget : Math.exp(cur + (tgt - cur) * 0.35);
   applyZoom(next, zAnchor[0], zAnchor[1]);
   zRaf = next === zTarget ? 0 : requestAnimationFrame(zStep);
@@ -686,7 +752,7 @@ function zoomTo(z, cx, cy) {
   if (reduceMotion.matches) { applyZoom(zTarget, cx, cy); return; }
   if (!zRaf) zRaf = requestAnimationFrame(zStep);
 }
-const zBase = () => zRaf ? zTarget : S.zoom;
+const zBase = () => zRaf ? zTarget : curZoom();
 const ZSTEPS = [0.3, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
 const zoomIn = () => zoomTo(ZSTEPS.find(s => s > zBase() + 0.001) || 4);
 const zoomOut = () => zoomTo([...ZSTEPS].reverse().find(s => s < zBase() - 0.001) || 0.3);
